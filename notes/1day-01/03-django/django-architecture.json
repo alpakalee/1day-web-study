@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Django가 개발자 대신 해주는 일",
+    "output": "django-architecture.html",
+    "quality_profile": "showcase",
+    "viewBox": [1100, 620]
+  },
+  "components": [
+    { "id": "user-raw", "type": "external", "label": "사용자 요청", "sublabel": "HTTP", "pos": [120, 60], "size": [140, 50] },
+    { "id": "raw-parse", "type": "backend", "label": "HTTP 파싱", "sublabel": "직접 구현", "pos": [120, 160], "size": [140, 50] },
+    { "id": "raw-route", "type": "backend", "label": "URL 분기", "sublabel": "if/else 작성", "pos": [120, 260], "size": [140, 50] },
+    { "id": "raw-sql", "type": "backend", "label": "SQL 직접 작성", "sublabel": "문자열 조립", "pos": [120, 360], "size": [140, 50] },
+    { "id": "raw-db", "type": "database", "label": "Database", "pos": [120, 460], "size": [140, 50] },
+
+    { "id": "user-dj", "type": "external", "label": "사용자 요청", "sublabel": "HTTP", "pos": [560, 60], "size": [140, 50] },
+    { "id": "dj-urls", "type": "frontend", "label": "URL Router", "sublabel": "urls.py", "pos": [560, 160], "size": [140, 50] },
+    { "id": "dj-views", "type": "backend", "label": "View", "sublabel": "views.py", "pos": [560, 260], "size": [140, 50] },
+    { "id": "dj-orm", "type": "backend", "label": "ORM", "sublabel": "Python → SQL 변환", "pos": [560, 360], "size": [140, 50] },
+    { "id": "dj-db", "type": "database", "label": "Database", "pos": [560, 460], "size": [140, 50] },
+
+    { "id": "dj-template", "type": "frontend", "label": "Template", "sublabel": "동적 HTML", "pos": [800, 260], "size": [140, 50] },
+    { "id": "dj-admin", "type": "frontend", "label": "Admin", "sublabel": "관리 페이지", "pos": [800, 360], "size": [140, 50] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "직접 구현 — 전부 개발자 몫", "wraps": ["raw-parse", "raw-route", "raw-sql"] },
+    { "kind": "region", "label": "Django — 프레임워크가 처리", "wraps": ["dj-urls", "dj-views", "dj-orm", "dj-template", "dj-admin"] }
+  ],
+  "connections": [
+    { "id": "r1", "from": "user-raw", "to": "raw-parse", "fromSide": "bottom", "toSide": "top" },
+    { "id": "r2", "from": "raw-parse", "to": "raw-route", "fromSide": "bottom", "toSide": "top" },
+    { "id": "r3", "from": "raw-route", "to": "raw-sql", "fromSide": "bottom", "toSide": "top" },
+    { "id": "r4", "from": "raw-sql", "to": "raw-db", "label": "직접 SQL", "fromSide": "bottom", "toSide": "top", "variant": "emphasis", "labelDy": 24 },
+
+    { "id": "d1", "from": "user-dj", "to": "dj-urls", "fromSide": "bottom", "toSide": "top" },
+    { "id": "d2", "from": "dj-urls", "to": "dj-views", "fromSide": "bottom", "toSide": "top" },
+    { "id": "d3", "from": "dj-views", "to": "dj-orm", "label": "Python 코드", "fromSide": "bottom", "toSide": "top", "labelDy": 24 },
+    { "id": "d4", "from": "dj-orm", "to": "dj-db", "label": "안전한 SQL", "fromSide": "bottom", "toSide": "top", "variant": "emphasis", "labelDy": 24 },
+    { "id": "d5", "from": "dj-views", "to": "dj-template", "label": "렌더링", "fromSide": "right", "toSide": "left" },
+    { "id": "d6", "from": "dj-admin", "to": "dj-orm", "label": "CRUD", "variant": "dashed", "fromSide": "left", "toSide": "right" }
+  ],
+  "cards": [
+    { "dot": "rose", "title": "직접 구현하면", "items": ["HTTP 파싱, URL 분기, SQL 조립 전부 수동", "SQL 문자열 조립 시 Injection 위험"] },
+    { "dot": "emerald", "title": "Django를 쓰면", "items": ["URL 라우팅, ORM, Template, Admin 자동 제공", "ORM이 값을 매개변수 바인딩 → 기본적으로 안전", "개발자는 View 로직에만 집중"] }
+  ]
+}

@@ -323,10 +323,106 @@ CR(`0x0D`)과 LF(`0x0A`)도 로그에서는 새 줄을 만든다. 사용자 입�
 | 확인됨 | `FilteredRelation`이 포함된 쿼리에서 사용자 제공 alias와 제어문자 검사가 문제였다. |
 | 확인됨 | 패치는 C0(`0x00–0x1F`)과 C1(`0x7F–0x9F`) 전체를 SQL 생성 전에 거부한다. |
 | 확인됨 | 패치의 회귀 테스트는 범위 안의 모든 문자가 각 QuerySet 경로에서 `ValueError`를 내는지 검사한다. |
+| 실증됨 | `FilteredRelation` alias는 SQL에 따옴표 없이 삽입된다 (`quote_name_unless_alias()`). |
+| 실증됨 | 패치 전 정규식은 55개 제어문자 + 24개 ASCII 특수문자 = 79개 문자를 통과시킨다. |
+| 실증됨 | alias에 `%s`를 넣으면 psycopg2의 파라미터 바인딩이 꼬여 `IndexError` 크래시가 발생한다 (DoS). |
+| 실증됨 | alias를 기존 테이블명(`poc_author`)과 동일하게 하면 Django가 FROM 절의 원래 테이블을 제거해 SQL 구조가 파괴된다. |
+| 실증됨 | PG에서 C1 문자(`0x80`~`0x9F`)는 psycopg2가 UTF-8로 인코딩하고 PG가 제어문자를 제거해 컬럼명이 변형된다. |
+| 실증됨 | MariaDB 10.11에서 C0 문자(`0x01`~`0x1B`)는 unquoted alias에서 syntax error를 일으킨다 (PG와 다른 동작). |
+| 실증됨 | 패치 후에도 `%`, `(`, `)`, `,`, `.` 등 24개 SQL 연산자·구분자가 check_alias를 통과한다. |
+| 미달성 | 테스트한 모든 DB(PG 16, MySQL 8.0, MariaDB 10.11)에서 완전한 SQL Injection(다른 테이블 데이터 읽기)은 달성하지 못했다. |
 | 공개되지 않음 | 실제 공격에 사용된 제어문자, 대상 DB, 완성된 payload, 최종 생성 SQL. |
-| 단정할 수 없음 | 차단된 65개 문자가 각각 독립적으로 SQL Injection에 성공한다는 주장. |
 
-따라서 현재 문서에서 가능한 결론은 “제어문자는 실제로 경계와 해석을 바꿔 위험할 수 있고, Django는 그 위험이 alias sink까지 도달하지 못하도록 범위 전체를 차단했다”까지다. 정확한 CVE PoC는 별도 검증 없이 만들어서 적을 수 없다.
+## 실증 테스트 결과
+
+Django 5.2.10(패치 전), PostgreSQL 16, MySQL 8.0, MariaDB 10.11 환경에서 검증했다. 테스트 코드: `../../tmp/test_*.py`.
+
+### 1. unquoted alias 확인
+
+`FilteredRelation` alias는 `compiler.py`의 `quote_name_unless_alias()`에서 따옴표가 생략된다. 정상 alias `pub`로 생성한 SQL에서 확인했다.
+
+```sql
+INNER JOIN “poc_book” pub ON (“poc_author”.”id” = pub.”author_id”)
+```
+
+`pub`에 따옴표가 없다. 공격자가 alias에 SQL 연산자나 키워드를 넣으면 SQL 구조가 변할 수 있는 위치다.
+
+### 2. 토큰 분리 문자
+
+unquoted alias에 포함된 특수문자가 SQL 파서에서 토큰을 분리하는지 테스트했다.
+
+| 문자 | PostgreSQL 16 | MySQL 8.0 | MariaDB 10.11 |
+|---|---|---|---|
+| `+` | 분리 | 분리 | 분리 |
+| `-` | 분리 | 분리 | 분리 |
+| `@` | 분리 | 분리 | 분리 |
+| `~` | 분리 | 분리 | 분리 |
+| `.` | 분리 | — | — |
+| `!` | — | 분리 | 분리 |
+
+제어문자(C0·C1)는 PG에서 토큰 분리 없이 식별자에 포함되거나 제거됐고, MariaDB에서는 syntax error로 거부됐다.
+
+### 3. `%s` alias → 파라미터 바인딩 크래시 (DoS)
+
+alias에 `%s`가 포함되면 psycopg2가 이를 파라미터 플레이스홀더로 해석해 `IndexError`가 발생한다.
+
+```python
+Author.objects.aggregate(**{“x%sx”: Avg(“id”)})
+# IndexError: tuple index out of range
+```
+
+생성된 SQL에 `AS “x%sx”`가 들어가고, psycopg2가 `%s`를 바인딩하려 하지만 대응하는 파라미터가 없어 크래시한다. `%` 문자는 패치 후 정규식에도 포함되지 않으므로 **패치 후에도 유효한 DoS 벡터**다.
+
+### 4. alias shadowing → SQL 구조 파괴
+
+alias를 기존 테이블명과 동일하게 설정하면 Django 내부에서 테이블 참조가 충돌한다.
+
+```python
+Author.objects.annotate(
+    poc_author=FilteredRelation(“books”, condition=Q(books__is_published=True))
+).annotate(cnt=Count(“poc_author__id”))
+```
+
+생성된 SQL에서 원래 FROM 절의 `”poc_author”`가 사라진다.
+
+```sql
+SELECT ... FROM LEFT OUTER JOIN “poc_book” poc_author ON (...)
+--               ↑ FROM 뒤에 바로 JOIN — 기본 테이블 없음
+```
+
+`ProgrammingError: syntax error at or near “OUTER”` — SQL이 구조적으로 깨진다.
+
+### 5. SQL Injection이 달성되지 않는 이유
+
+| 필요 조건 | 상태 |
+|---|---|
+| SQL 키워드(`FROM`, `JOIN`, `OR`) 삽입 | 키워드는 공백으로 분리해야 하는데 `\s`가 차단 |
+| 괄호로 서브쿼리 삽입 | `(`, `)`는 통과하지만 JOIN 컨텍스트에서 syntax error |
+| `,`로 추가 테이블 참조 | `LEFT OUTER JOIN ... x,secrets ON (...)` → PG syntax error |
+| 연산자(`+`, `-`)로 키워드 분리 | SELECT/WHERE 내에서만 토큰 분리, FROM/JOIN 후에는 불가 |
+| `$`로 dollar-quoting | Django가 `$`를 별도 검증으로 차단 |
+
+연산자는 SQL 값 컨텍스트에서 토큰을 분리하지만, SQL 절(`FROM`, `JOIN`, `ON`)의 구조를 바꾸지는 못한다. `FROM+poc_author`는 syntax error다.
+
+### 6. 패치 후 잔존하는 공격면
+
+패치는 C0·C1 제어문자를 차단했지만 24개 ASCII 특수문자와 24개 Latin-1 특수문자는 여전히 통과한다.
+
+```text
+패치 후에도 통과하는 위험 문자:
+% → psycopg2 파라미터 플레이스홀더 (%s 크래시)
+( ) → SQL 괄호
+, → SQL 구분자
+. → 스키마·테이블 구분
++ - * / → SQL 산술 연산자
+= < > → SQL 비교 연산자
+| & ^ ~ → SQL 비트 연산자
+: → PG 타입 캐스트 (::)
+? → PG JSON 연산자
+@ → PG 연산자
+```
+
+현재 이 문자들로 완전한 SQL Injection은 달성되지 않지만, `%s` DoS와 alias shadowing은 패치 후에도 가능하다. 이는 denylist 방식의 한계를 보여준다.
 
 ## 공개 패치로 확인할 수 있는 재현
 
